@@ -47,12 +47,24 @@ program eigensolver
   real(kind=kind(0.0))                            :: init_cpu_time
   real(kind=kind(0.0))                            :: curr_cpu_time
 
+  ! Determine whether there should be a preconditioner
+  integer :: precon
+  character(len=20) :: num1char
+  character(len=20) :: num2char
+
   ! BLAS
   complex(kind=dp),external :: zdotc
 
   ! No. nonzero wavevectors "G" in our wavefunction expansion
-  num_wavevectors = 100
-  read(*,*) num_wavevectors
+
+  ! first argument is the number of wavevectors
+  call GET_COMMAND_ARGUMENT(1,num1char)   !first, read in the two values
+  ! second argument is the preconditioner presence
+  call GET_COMMAND_ARGUMENT(2,num2char)
+
+  read(num1char,*) num_wavevectors                    !then, convert them to REALs
+  read(num2char,*) precon
+  
 
   ! No. plane-waves in our wavefunction expansion. One plane-wave has
   ! wavevector 0, and for all the others there are plane-waves at +/- G
@@ -118,6 +130,13 @@ program eigensolver
   write(*,*) '+-----------+----------------+-----------------+'
 
   call cpu_time(init_cpu_time)
+  
+  ! open the file depending on whether preconditioning has been selected
+  if (precon == 1) then
+  	open(1560,file='preconditioned_data.dat',access='append')
+  else
+  	open(1560,file='normal_data.dat',access='append')
+  endif
 
   ! We start from a random guess
   call randomise_state(num_pw,num_states,trial_wvfn)
@@ -155,6 +174,13 @@ program eigensolver
 
     ! Any modifications to the search direction go here
 
+    ! modify the search direction by implementing a preconditioner
+    if (precon == 1) then
+    	call precondition(num_pw,num_states,search_direction,trial_wvfn,H_kinetic)
+    	! make the search direction orthogonal to the trial wavefunction
+    	call orthogonalise(num_pw,num_states,search_direction,trial_wvfn)
+    endif
+
     ! Search along this direction for the best approx. eigenvector
     call line_search(num_pw,num_states,trial_wvfn,H_kinetic,H_local,search_direction,gradient,eigenvalue,energy)
 
@@ -174,13 +200,18 @@ program eigensolver
   call cpu_time(curr_cpu_time)
 
   write(*,*) 'Iterative search took ',curr_cpu_time-init_cpu_time,' secs'
+  
+  ! here we write the data for the preconditioned and non preconditioned solution to file with append
+  write(1560,*) curr_cpu_time-init_cpu_time, full_eigenvalues(1), eigenvalue(1), iter
 
   ! Finally summarise the results
   write(*,'(a,t17,a,t38,a)') 'Eigenvalue','Iterative','Exact'
   do nb=1,num_states
     write(*,'(i5,5x,2g20.10)') nb,eigenvalue(nb),full_eigenvalues(nb)
   end do
-
+  
+  ! close the output writer file
+  close(1560)
   call output_results(num_pw,num_states,H_local,trial_wvfn)
 
   ! Deallocate memory
@@ -333,7 +364,7 @@ end program eigensolver
     real(kind=dp)                                :: kinetic_eigenvalue,x,temp
 
     ! Delete this line once you've coded this subroutine
-    stop 'Subroutine precondition has not been written yet'
+    !stop 'Subroutine precondition has not been written yet'
 
     kinetic_eigenvalue = 0.0_dp
     do nb=1,num_states
@@ -342,16 +373,29 @@ end program eigensolver
        ! wvfn+.H_kinetic.wvfn. H_kinetic is diagonal and stored as a
        ! vector so the ith element of H_kinetic.wvfn is H_kinetic(i)*wvfn(i)
        ! Hence....
-
-       do np=1,num_pw
-       kinetic_eigenvalue = kinetic_eigenvalue + conj(trial_wvfn(np,nb))
-
+	
+     
+       kinetic_eigenvalue = sum((conjg(trial_wvfn(:,nb))*H_kinetic(:)*trial_wvfn(:,nb)) &
+	/ (trial_wvfn(:,nb)*conjg(trial_wvfn(:,nb))))
+ 
+       do np=1, num_pw
           ! Compute and apply the preconditioning.
+          
+	  x = H_kinetic(np) / kinetic_eigenvalue
+          !print*, x, H_kinetic(np), kinetic_eigenvalue
 
+	  temp = (8. + 4.*x + 2.*x**2 + x**3) / (8. + 4.*x + 2.*x**2 + x**3 + x**4)
+
+	  search_direction(np,nb) = search_direction(np,nb)* temp
+
+	  ! preconditioning is applied to variable search_direction
+          
+          
        end do
+       
+       
 
     end do
-
     return
 
   end subroutine precondition
