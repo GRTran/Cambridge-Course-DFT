@@ -2,7 +2,7 @@
 CC=gcc
 F90=gfortran
 ELEC=-lhamiltonian
-INCFLAGS=-I/usr/include/ 
+INCFLAGS=-I/usr/include/
 LDFLAGS=-L. -Wl,-rpath=. -Bdynamic -llapack -lblas -lfftw3
 TARGET=.
 
@@ -20,4 +20,3 @@ lib: hamiltonian.f90
 clean:
 	rm -f *.a *.o *.mod *.so
 	rm eigensolver
-

@@ -1,4 +1,5 @@
 program eigensolver
+
   !-------------------------------------------------!
   ! This program is designed to illustrate the use  !
   ! of numerical methods and optimised software     !
@@ -31,7 +32,9 @@ program eigensolver
   integer                                         :: num_pw     ! no. plane-waves = 2*wavevectors+1
   integer                                         :: num_states ! no. eigenstates req'd
 
-  complex(kind=dp), dimension(:,:), allocatable   :: trial_wvfn,gradient,search_direction
+  complex(kind=dp), dimension(:,:), allocatable   :: trial_wvfn,gradient_current
+  complex(kind=dp), dimension(:,:), allocatable   :: search_direction_current
+  complex(kind=dp), dimension(:,:), allocatable   :: search_direction_previous
   real(kind=dp),    dimension(:),   allocatable   :: eigenvalue
   integer                                         :: iter,max_iter
   real(kind=dp)                                   :: energy,prev_energy,energy_tol
@@ -49,8 +52,11 @@ program eigensolver
 
   ! Determine whether there should be a preconditioner
   integer :: precon
+  integer :: conjugate_method
+  complex(kind=dp) :: beta_new, beta_old
   character(len=20) :: num1char
   character(len=20) :: num2char
+  character(len=20) :: num3char
 
   ! BLAS
   complex(kind=dp),external :: zdotc
@@ -61,9 +67,12 @@ program eigensolver
   call GET_COMMAND_ARGUMENT(1,num1char)   !first, read in the two values
   ! second argument is the preconditioner presence
   call GET_COMMAND_ARGUMENT(2,num2char)
+  ! third argument is the conjugate gradient presence
+  call GET_COMMAND_ARGUMENT(3,num3char)
 
   read(num1char,*) num_wavevectors                    !then, convert them to REALs
   read(num2char,*) precon
+  read(num3char,*) conjugate_method
   !num_wavevectors = 200
   !precon = 0
 
@@ -108,15 +117,17 @@ program eigensolver
   full_eigenvalues = 0.0_dp
 
   ! You need to complete this subroutine:
-  !call exact_diagonalisation(num_pw,H_kinetic,H_local,full_eigenvalues)
+  call exact_diagonalisation(num_pw,H_kinetic,H_local,full_eigenvalues)
   call cpu_time(curr_cpu_time)
 
-  !write(*,*) 'Full diagonalisation took ',curr_cpu_time-init_cpu_time,' secs',full_eigenvalues(1)
+  write(*,*) 'Full diagonalisation took ',curr_cpu_time-init_cpu_time,' secs',full_eigenvalues(1)
+  stop
 
   ! Allocate memory for iterative eigenvector search
 
-  allocate(trial_wvfn(num_pw,num_states),gradient(num_pw,num_states),search_direction(num_pw,num_states),stat=status)
-  if(status/=0) stop 'Error allocating RAM to trial_wvfn, gradient and search_direction'
+  allocate(trial_wvfn(num_pw,num_states),gradient_current(num_pw,num_states),&
+  search_direction_current(num_pw,num_states),stat=status)
+  if(status/=0) stop 'Error allocating RAM to trial_wvfn, gradient_current and search_direction_current'
 
   allocate(eigenvalue(num_states),stat=status)
   if(status/=0) stop 'Error allocating RAM to eigenvalues'
@@ -131,12 +142,12 @@ program eigensolver
   write(*,*) '+-----------+----------------+-----------------+'
 
   call cpu_time(init_cpu_time)
-  
+
   ! open the file depending on whether preconditioning has been selected
   if (precon == 1) then
-  	open(1560,file='preconditioned_data.dat',access='append')
+     open(1560,file='preconditioned_data.dat',access='append')
   else
-  	open(1560,file='normal_data.dat',access='append')
+     open(1560,file='normal_data.dat',access='append')
   endif
 
   ! We start from a random guess
@@ -146,11 +157,11 @@ program eigensolver
   call orthonormalise(num_pw,num_states,trial_wvfn)
 
   ! Apply the H to this state
-  call apply_H(num_pw,num_states,trial_wvfn,H_kinetic,H_local,gradient)
+  call apply_H(num_pw,num_states,trial_wvfn,H_kinetic,H_local,gradient_current)
 
   ! Compute the eigenvalues
   do nb=1,num_states
-    eigenvalue(nb) = zdotc(num_pw,trial_wvfn(1,nb),1,gradient(1,nb),1)
+     eigenvalue(nb) = zdotc(num_pw,trial_wvfn(1,nb),1,gradient_current(1,nb),1)
   end do
 
   energy = sum(eigenvalue)
@@ -159,58 +170,78 @@ program eigensolver
   ! In case of problems, we cap the total number of iterations
   max_iter = 40000
 
+  beta_new = 0.0_dp
+  beta_old = 0.0_dp
+
   main_loop: do iter=1,max_iter
 
-    prev_energy = energy
+     prev_energy = energy
 
-    ! The constrained gradient is H.wvfn - (wvfn+.H.wvfn)*wvfn
-    ! -- i.e. it is orthogonal to wvfn
+     ! The constrained gradient is H.wvfn - (wvfn+.H.wvfn)*wvfn
+     ! -- i.e. it is orthogonal to wvfn
 
-    ! You need to complete this subroutine:
-    call orthogonalise(num_pw,num_states,gradient,trial_wvfn)
+     ! You need to complete this subroutine:
+     call orthogonalise(num_pw,num_states,gradient_current,trial_wvfn)
 
-    ! The steepest descent direction is minus the gradient
-    call zcopy(num_pw*num_states,gradient,1,search_direction,1)
-    call zdscal(num_pw*num_states,-1.0_dp,search_direction,1)
+     ! The steepest descent direction is minus the gradient
+     call zcopy(num_pw*num_states,gradient_current,1,search_direction_current,1)
+     call zdscal(num_pw*num_states,-1.0_dp,search_direction_current,1)
 
-    ! Any modifications to the search direction go here
+     ! Any modifications to the search direction go here
 
-    ! modify the search direction by implementing a preconditioner
-    if (precon == 1) then
-    	call precondition(num_pw,num_states,search_direction,trial_wvfn,H_kinetic)
-    	! make the search direction orthogonal to the trial wavefunction
-    	call orthogonalise(num_pw,num_states,search_direction,trial_wvfn)
+     ! modify the search direction by implementing a preconditioner
+     if (precon == 0 .and. iter == 1) then
+       beta_old = sum( conjg(gradient_current(:,1))*gradient_current(:,1))
+     endif
+     if (precon == 1 ) then
+    	call precondition(num_pw,num_states,search_direction_current,trial_wvfn,H_kinetic, beta_new, gradient_current)
+     ! make the search direction orthogonal to the trial wavefunction
+    	call orthogonalise(num_pw,num_states,search_direction_current,trial_wvfn)
+     endif
+     if (iter >1 .and. conjugate_method == 1 .and. mod(iter,10)/=0) then
+       write(*,*) 'Executing Conjugate Gradient'
+
+      call conjugate_gradients(num_pw,num_states,search_direction_current,&
+      search_direction_previous, gradient_current, beta_new, beta_old, precon)
+      call orthogonalise(num_pw,num_states, search_direction_current, trial_wvfn)
+    else
+      write(*,*) 'Resetting Fletcher-Reeves Conjugate Gradients'
     endif
 
-    ! Search along this direction for the best approx. eigenvector
-    call line_search(num_pw,num_states,trial_wvfn,H_kinetic,H_local,search_direction,gradient,eigenvalue,energy)
+
+     ! Search along this direction for the best approx. eigenvector
+     call line_search(num_pw,num_states,trial_wvfn,H_kinetic,H_local,search_direction_current,gradient_current,eigenvalue,energy)
 
      ! Check convergence
-    if(abs(prev_energy-energy)<energy_tol) then
-      write(*,*) '+-----------+----------------+-----------------+'
-      write(*,*) 'Eigenvalues converged'
-      exit
-    end if
+     if(abs(prev_energy-energy)<energy_tol) then
+        write(*,*) '+-----------+----------------+-----------------+'
+        write(*,*) 'Eigenvalues converged'
+        exit
+     end if
 
-    energy = sum(eigenvalue)
+     energy = sum(eigenvalue)
+     search_direction_previous = search_direction_current
+     if (precon == 1) then
+       beta_old = beta_new
+     endif
 
-    write(*,'(a,i5,1x,a,g15.8,a,g15.8,a)') ' |    ',iter,' | ',energy,'| ',prev_energy-energy,' |'
+     write(*,'(a,i5,1x,a,g15.8,a,g15.8,a)') ' |    ',iter,' | ',energy,'| ',prev_energy-energy,' |'
 
   end do main_loop
 
   call cpu_time(curr_cpu_time)
 
   write(*,*) 'Iterative search took ',curr_cpu_time-init_cpu_time,' secs'
-  
+
   ! here we write the data for the preconditioned and non preconditioned solution to file with append
   write(1560,*) curr_cpu_time-init_cpu_time, full_eigenvalues(1), eigenvalue(1), iter
 
   ! Finally summarise the results
   write(*,'(a,t17,a,t38,a)') 'Eigenvalue','Iterative','Exact'
   do nb=1,num_states
-    write(*,'(i5,5x,2g20.10)') nb,eigenvalue(nb),full_eigenvalues(nb)
+     write(*,'(i5,5x,2g20.10)') nb,eigenvalue(nb),full_eigenvalues(nb)
   end do
-  
+
   ! close the output writer file
   close(1560)
   call output_results(num_pw,num_states,H_local,trial_wvfn)
@@ -219,11 +250,14 @@ program eigensolver
   deallocate(full_eigenvalues,stat=status)
   if(status/=0) stop 'Error deallocating RAM from full_eigenvalues'
 
-  deallocate(search_direction,stat=status)
-  if(status/=0) stop 'Error deallocating RAM from search_direction'
+  deallocate(search_direction_current,stat=status)
+  if(status/=0) stop 'Error deallocating RAM from search_direction_current'
 
-  deallocate(gradient,stat=status)
-  if(status/=0) stop 'Error deallocating RAM from gradient'
+  deallocate(search_direction_previous,stat=status)
+  if(status/=0) stop 'Error deallocating RAM from search_direction_previous'
+
+  deallocate(gradient_current,stat=status)
+  if(status/=0) stop 'Error deallocating RAM from gradient_current'
 
   deallocate(trial_wvfn,stat=status)
   if(status/=0) stop 'Error deallocating RAM from trial_wvfn'
@@ -343,7 +377,7 @@ end program eigensolver
 
   end subroutine orthogonalise
 
-  subroutine precondition(num_pw,num_states,search_direction,trial_wvfn,H_kinetic)
+  subroutine precondition(num_pw,num_states,search_direction,trial_wvfn,H_kinetic, beta_new, gradients_current)
     !-------------------------------------------------!
     ! This subroutine takes a search direction and    !
     ! applies a simple kinetic energy-based           !
@@ -360,13 +394,15 @@ end program eigensolver
     complex(kind=dp), dimension(num_pw,num_states), intent(inout) :: search_direction
     complex(kind=dp), dimension(num_pw,num_states), intent(in)    :: trial_wvfn
     real(kind=dp),    dimension(num_pw),            intent(in)    :: H_kinetic
+    complex(kind=dp), dimension(num_pw,num_states), intent(in)    :: gradients_current
+    complex(kind=dp), intent(inout) :: beta_new
 
     integer                                      :: np,nb
     real(kind=dp)                                :: kinetic_eigenvalue,x,temp
 
     ! Delete this line once you've coded this subroutine
     !stop 'Subroutine precondition has not been written yet'
-
+    beta_new = cmplx(0.0_dp,0.0_dp,dp)
     kinetic_eigenvalue = 0.0_dp
     do nb=1,num_states
        ! Compute kinetic energy eigenvalue for state nb
@@ -374,8 +410,8 @@ end program eigensolver
        ! wvfn+.H_kinetic.wvfn. H_kinetic is diagonal and stored as a
        ! vector so the ith element of H_kinetic.wvfn is H_kinetic(i)*wvfn(i)
        ! Hence....
-	
-     
+
+
        kinetic_eigenvalue = sum((conjg(trial_wvfn(:,nb))*H_kinetic(:)*trial_wvfn(:,nb))) &
 	/ sum((trial_wvfn(:,nb)*conjg(trial_wvfn(:,nb))))
 
@@ -384,26 +420,66 @@ end program eigensolver
  	!kinetic_eigenvalue = H_kinetic(num_pw)
        do np=1, num_pw
           ! Compute and apply the preconditioning.
-          
-	  x = H_kinetic(np) / (2._dp*kinetic_eigenvalue)
+
+	        x = H_kinetic(np) / (2._dp*kinetic_eigenvalue)
           !print*, x, H_kinetic(np), kinetic_eigenvalue
 
-	  temp = (8._dp + 4._dp*x + 2._dp*x**2 + x**3) / (8._dp + 4._dp*x + 2._dp*x**2 + x**3 + x**4)
+	         temp = (8._dp + 4._dp*x + 2._dp*x**2 + x**3) / (8._dp + 4._dp*x + 2._dp*x**2 + x**3 + x**4)
+           beta_new = beta_new + (conjg(gradients_current(np,nb))*temp*gradients_current(np,nb) )
 
-	  search_direction(np,nb) = search_direction(np,nb)* temp
-
-	  ! preconditioning is applied to variable search_direction
-          
+	         search_direction(np,nb) = search_direction(np,nb)* temp
           !print*, temp
        end do
-       
-       
-
     end do
 	!stop
     return
 
   end subroutine precondition
+
+  subroutine conjugate_gradients(num_pw,num_states,search_direction_current,search_direction_previous,&
+     gradients_current, beta_new, beta_old, precon)
+    implicit none
+
+    ! this subroutine calculates a new search direction that is based on the previous using a Fletcher-Reeves
+    ! style conjugate gradient method
+    ! Define what we mean by double-precision
+    integer, parameter                           :: dp=selected_real_kind(15,300)
+
+    integer,                                        intent(in)    :: num_pw
+    integer,                                        intent(in)    :: num_states
+    complex(kind=dp), dimension(num_pw,num_states), intent(inout) :: search_direction_current
+    complex(kind=dp), dimension(num_pw,num_states), intent(in)    :: search_direction_previous
+    complex(kind=dp), dimension(num_pw,num_states), intent(in)    :: gradients_current
+    complex(kind=dp), intent(inout) :: beta_new, beta_old
+    integer, intent(in) :: precon
+
+    real(kind=dp) :: gamma
+    integer       :: ns
+
+    gamma = 0.0_dp
+
+    if (precon==0) then
+      beta_new = sum( conjg(gradients_current(:,1))*gradients_current(:,1))
+      print*, beta_old, beta_new
+      gamma = beta_new / beta_old
+      beta_old = beta_new
+      search_direction_current(:,1) = search_direction_current(:,1) + &
+      gamma*search_direction_previous(:,1)
+      return
+    endif
+
+
+    do ns = 1, num_states
+       gamma = beta_new / beta_old
+
+
+       print*, 'gamma: ',gamma
+       search_direction_current(:,ns) = search_direction_current(:,ns) + gamma*search_direction_previous(:,ns)
+    enddo
+
+
+
+  end subroutine conjugate_gradients
 
   subroutine diagonalise(num_pw,num_states,state,H_state,eigenvalues,rotation)
     !-------------------------------------------------!
@@ -436,9 +512,9 @@ end program eigensolver
 
     ! Compute the subspace H matrix and store in rotation array
     do nb2=1,num_states
-      do nb1=1,num_states
-        rotation(nb1,nb2) = zdotc(num_pw,state(:,nb1),1,H_state(:,nb2),1)
-      end do
+       do nb1=1,num_states
+          rotation(nb1,nb2) = zdotc(num_pw,state(:,nb1),1,H_state(:,nb2),1)
+       end do
     end do
 
     ! Compute diagonalisation
@@ -490,9 +566,9 @@ end program eigensolver
 
     ! Compute the overlap matrix
     do nb2=1,num_states
-      do nb1=1,num_states
-        overlap(nb1,nb2) = zdotc(num_pw,state(:,nb1),1,state(:,nb2),1)
-      end do
+       do nb1=1,num_states
+          overlap(nb1,nb2) = zdotc(num_pw,state(:,nb1),1,state(:,nb2),1)
+       end do
     end do
 
     ! Compute orthogonalising transformation
@@ -507,9 +583,9 @@ end program eigensolver
 
     ! Set lower triangle to zero
     do nb2 = 1,num_states
-      do nb1 = nb2+1,num_states
-        overlap(nb1,nb2)=cmplx(0.0_dp,0.0_dp,dp)
-      end do
+       do nb1 = nb2+1,num_states
+          overlap(nb1,nb2)=cmplx(0.0_dp,0.0_dp,dp)
+       end do
     end do
 
     ! overlap array now contains the (upper triangular) orthonormalising transformation
@@ -545,13 +621,17 @@ end program eigensolver
     if(status/=0) stop 'Error allocating RAM to new_state in transform'
 
     new_state = cmplx(0.0_dp,0.0_dp,dp)
+    !$OMP PARALLEL
+    !$OMP DO
     do nb2=1,num_states
-      do nb1=1,num_states
-        do np=1,num_pw
-          new_state(np,nb1) = new_state(np,nb1) + state(np,nb2)*transformation(nb2,nb1)
-        end do
-      end do
+       do nb1=1,num_states
+          do np=1,num_pw
+             new_state(np,nb1) = new_state(np,nb1) + state(np,nb2)*transformation(nb2,nb1)
+          end do
+       end do
     end do
+    !$OMP END DO
+    !$OMP END PARALLEL
 
     state = new_state
 
@@ -563,7 +643,7 @@ end program eigensolver
   end subroutine transform
 
   subroutine line_search(num_pw,num_states,approx_state,H_kinetic,H_local,direction, &
-                       & gradient,eigenvalue,energy)
+       & gradient,eigenvalue,energy)
     !-------------------------------------------------!
     ! This subroutine takes an approximate eigenstate !
     ! and searches along a direction to find an       !
@@ -586,7 +666,7 @@ end program eigensolver
 
     real(kind=dp)                                 :: init_energy
     real(kind=dp)                                 :: tmp_energy
-!    real(kind=dp), save                           :: trial_step=0.00004_dp
+    !    real(kind=dp), save                           :: trial_step=0.00004_dp
     real(kind=dp), save                           :: trial_step=0.4_dp
     real(kind=dp)                                 :: step
     real(kind=dp)                                 :: opt_step
@@ -607,7 +687,7 @@ end program eigensolver
     ! To try to keep a convenient step length, we reduce the size of the search direction
     mean_norm = 0.0_dp
     do nb=1,size(approx_state,2)
-      mean_norm = mean_norm + dznrm2(num_pw,direction,1)
+       mean_norm = mean_norm + dznrm2(num_pw,direction,1)
     end do
     mean_norm = mean_norm/real(size(approx_state,2),dp)
 
@@ -616,7 +696,7 @@ end program eigensolver
     ! The rate-of-change of the energy is just 2*Re(conjg(direction).gradient)
     denergy_dstep = 0.0_dp
     do nb=1,size(approx_state,2)
-      denergy_dstep = denergy_dstep + 2*real(zdotc(num_pw,direction(:,nb),1,gradient(:,nb),1),dp)
+       denergy_dstep = denergy_dstep + 2*real(zdotc(num_pw,direction(:,nb),1,gradient(:,nb),1),dp)
     end do
 
     allocate(tmp_state(size(approx_state,1),size(approx_state,2)),stat=status)
@@ -631,39 +711,39 @@ end program eigensolver
     ! We find a trial step that lowers the energy:
     do loop=1,10
 
-      tmp_state = approx_state + step*direction
+       tmp_state = approx_state + step*direction
 
-      call orthonormalise(num_pw,num_states,tmp_state)
+       call orthonormalise(num_pw,num_states,tmp_state)
 
-      ! Apply the H to this state
-      call apply_H(num_pw,num_states,tmp_state,H_kinetic,H_local,gradient)
+       ! Apply the H to this state
+       call apply_H(num_pw,num_states,tmp_state,H_kinetic,H_local,gradient)
 
-      ! Compute the new energy estimate
-      tmp_energy = 0.0_dp
-      do nb=1,num_states
-        tmp_energy = tmp_energy + real(zdotc(num_pw,tmp_state(:,nb),1,gradient(:,nb),1),dp)
-      end do
+       ! Compute the new energy estimate
+       tmp_energy = 0.0_dp
+       do nb=1,num_states
+          tmp_energy = tmp_energy + real(zdotc(num_pw,tmp_state(:,nb),1,gradient(:,nb),1),dp)
+       end do
 
-      if(tmp_energy<energy) then
-        exit
-      else
-        d2E_dstep2 = (tmp_energy - energy - step*denergy_dstep )/(step**2)
-        if(d2E_dstep2<0.0_dp) then
-          if(tmp_energy<energy) then
-            exit
+       if(tmp_energy<energy) then
+          exit
+       else
+          d2E_dstep2 = (tmp_energy - energy - step*denergy_dstep )/(step**2)
+          if(d2E_dstep2<0.0_dp) then
+             if(tmp_energy<energy) then
+                exit
+             else
+                step = step/4.0_dp
+             end if
           else
-            step = step/4.0_dp
+             step  = -denergy_dstep/(2*d2E_dstep2)
           end if
-        else
-          step  = -denergy_dstep/(2*d2E_dstep2)
-        end if
-      end if
+       end if
 
     end do
 
     if(tmp_energy<best_energy) then
-      best_step   = step
-      best_energy = tmp_energy
+       best_step   = step
+       best_energy = tmp_energy
     end if
 
     ! We now have the initial eigenvalue, the initial gradient, and a trial step
@@ -673,24 +753,24 @@ end program eigensolver
 
 
     if(d2E_dstep2<0.0_dp) then
-      ! Parabolic fit gives a maximum, so no good
-      write(*,'(a)') '** Warning, parabolic stationary point is a maximum **'
+       ! Parabolic fit gives a maximum, so no good
+       write(*,'(a)') '** Warning, parabolic stationary point is a maximum **'
 
-      if(tmp_energy<energy) then
-        opt_step = step
-      else
-        opt_step = 0.1_dp*step
-      end if
+       if(tmp_energy<energy) then
+          opt_step = step
+       else
+          opt_step = 0.1_dp*step
+       end if
     else
-      opt_step  = -denergy_dstep/(2*d2E_dstep2)
+       opt_step  = -denergy_dstep/(2*d2E_dstep2)
     end if
 
 
-!    e = e0 + de*x + c*x**2
-! => c = (e - e0 - de*x)/x**2
-! => min. at -de/(2c)
-!
-!    de/dx = de + 2*c*x
+    !    e = e0 + de*x + c*x**2
+    ! => c = (e - e0 - de*x)/x**2
+    ! => min. at -de/(2c)
+    !
+    !    de/dx = de + 2*c*x
 
     call zaxpy(num_pw*num_states,cmplx(opt_step,0.0_dp,dp),direction,1,approx_state,1)
 
@@ -702,39 +782,39 @@ end program eigensolver
     ! Compute the new energy estimate
     energy = 0.0_dp
     do nb=1,size(approx_state,2)
-      eigenvalue(nb) = real(zdotc(num_pw,approx_state(:,nb),1,gradient(:,nb),1),dp)
-      energy = energy + eigenvalue(nb)
+       eigenvalue(nb) = real(zdotc(num_pw,approx_state(:,nb),1,gradient(:,nb),1),dp)
+       energy = energy + eigenvalue(nb)
     end do
 
     ! This ought to be the best, but check...
     if(energy>best_energy) then
-!      if(best_step>0.0_dp) then
-      if(abs(best_step-epsilon(1.0_dp))>0.0_dp) then
+       !      if(best_step>0.0_dp) then
+       if(abs(best_step-epsilon(1.0_dp))>0.0_dp) then
 
-        call zaxpy(num_pw*num_states,cmplx(best_step,0.0_dp,dp),direction,1,gradient,1)
+          call zaxpy(num_pw*num_states,cmplx(best_step,0.0_dp,dp),direction,1,gradient,1)
 
-        call orthonormalise(num_pw,num_states,approx_state)
+          call orthonormalise(num_pw,num_states,approx_state)
 
-        ! Apply the H to this state
-        call apply_H(num_pw,num_states,approx_state,H_kinetic,H_local,gradient)
+          ! Apply the H to this state
+          call apply_H(num_pw,num_states,approx_state,H_kinetic,H_local,gradient)
 
-        ! Compute the new energy estimate
-        energy = 0.0_dp
-        do nb=1,size(approx_state,2)
-          eigenvalue(nb) = real(zdotc(num_pw,approx_state(:,nb),1,gradient(:,nb),1),dp)
-          energy = energy + eigenvalue(nb)
-        end do
+          ! Compute the new energy estimate
+          energy = 0.0_dp
+          do nb=1,size(approx_state,2)
+             eigenvalue(nb) = real(zdotc(num_pw,approx_state(:,nb),1,gradient(:,nb),1),dp)
+             energy = energy + eigenvalue(nb)
+          end do
 
-      else
-        write(*,*) 'Oh dear:',best_step
-        stop 'Problem with line search'
-      end if
+       else
+          write(*,*) 'Oh dear:',best_step
+          stop 'Problem with line search'
+       end if
     end if
 
-!    write(*,'(3f25.15,a)') opt_step,step,energy,' <- test2'
+    !    write(*,'(3f25.15,a)') opt_step,step,energy,' <- test2'
 
     ! We'll use this step as the basis of our trial step next time
-!    trial_step = 2*opt_step
+    !    trial_step = 2*opt_step
 
     deallocate(tmp_state,stat=status)
     if(status/=0) stop 'Error deallocating RAM from tmp_state in line_search'
@@ -773,7 +853,7 @@ end program eigensolver
     open(unit=10,file='pot.dat',form='formatted')
 
     do np=1,num_pw
-      write(10,*) real(np-1,kind=dp)/real(num_pw,kind=dp),H_local(np)
+       write(10,*) real(np-1,kind=dp)/real(num_pw,kind=dp),H_local(np)
     end do
 
     close(10)
@@ -790,20 +870,20 @@ end program eigensolver
     plan = fftw_plan_dft_1d(num_pw,tmp_wvfn,realspace_wvfn,FFTW_FORWARD,FFTW_ESTIMATE)
 
     do nb=1,num_states
-      write(filename,*) nb
-      filename='wvfn_'//trim(adjustl(filename))//'.dat'
-      open(unit=10,file=filename,form='formatted')
+       write(filename,*) nb
+       filename='wvfn_'//trim(adjustl(filename))//'.dat'
+       open(unit=10,file=filename,form='formatted')
 
-      tmp_wvfn = wvfn(:,nb)
+       tmp_wvfn = wvfn(:,nb)
 
-      ! Compute the FFT of in using the current plan, store in out.
-      call fftw_execute_dft(plan,tmp_wvfn,realspace_wvfn)
+       ! Compute the FFT of in using the current plan, store in out.
+       call fftw_execute_dft(plan,tmp_wvfn,realspace_wvfn)
 
-      do np=1,num_pw
-        write(10,*) real(np-1,kind=dp)/real(num_pw,kind=dp),real(realspace_wvfn(np),dp)
-      end do
+       do np=1,num_pw
+          write(10,*) real(np-1,kind=dp)/real(num_pw,kind=dp),real(realspace_wvfn(np),dp)
+       end do
 
-      close(10)
+       close(10)
     end do
 
     call fftw_destroy_plan(plan)

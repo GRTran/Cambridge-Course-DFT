@@ -1,0 +1,6 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+precon_dat = np.loadtxt('precondition_presentation_data.dat')
+
+print(precon_dat)
